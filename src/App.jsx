@@ -26,6 +26,254 @@ async function extractPdfText(file) {
   return fullText.trim();
 }
 
+/* ---------------- STAFFING ENGINE ---------------- */
+function normalizeName(value = "") {
+  return value.toLowerCase().replace(/[^a-z]/g, "");
+}
+
+function normalizeUnit(unit = "") {
+  const upper = unit.toUpperCase().trim();
+  if (/^T0*1$/.test(upper)) return "T1";
+  if (/^T0*10$/.test(upper)) return "T10";
+  if (/^T0*11$/.test(upper)) return "T11";
+  if (/^E0*101$/.test(upper)) return "E101";
+  if (/^HR0*1$/.test(upper)) return "HR1";
+  if (/^R0*1$/.test(upper)) return "R1";
+  return upper.replace(/^([A-Z]+)0+/, "$1");
+}
+
+function unitType(unit = "") {
+  const normalized = normalizeUnit(unit);
+  if (/^E\d+/.test(normalized)) return "Engine";
+  if (/^T\d+/.test(normalized) || normalized === "HAZ1" || normalized === "HR1") {
+    return "Truck/Special Ops";
+  }
+  if (/^R\d+/.test(normalized)) return "Rescue";
+  if (/^M\d+/.test(normalized) || normalized === "EMS1" || normalized === "EMS01") {
+    return "Medic Unit";
+  }
+  return "Other";
+}
+
+function isMedicSeat(seat = "") {
+  return ["FFP", "ENP", "LTP", "CVP", "ACPM"].includes(seat);
+}
+
+function parseRosterText(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const unitHeader = /^([A-Z]+\d{1,3}|HAZ1|HR01|HR1|EMS01|EMS1|M\d{3})\s*-?/;
+  const personLine = /^(LTP|LTE|ENP|ENE|FFP|FFE|CVP|CVE|DCP|DCE|ACPM)\s+(.+)$/;
+  const stopTokens = new Set(["OT", "VAC", "SICK", "TS+", "TS-", "OJI", "TP1", "WBACK", "PL"]);
+
+  let currentUnit = "";
+  const people = [];
+
+  for (const line of lines) {
+    const unitMatch = line.match(unitHeader);
+    if (unitMatch) {
+      currentUnit = normalizeUnit(unitMatch[1]);
+      continue;
+    }
+
+    const personMatch = line.match(personLine);
+    if (!personMatch || !currentUnit) continue;
+
+    const seat = personMatch[1];
+    const tokens = personMatch[2].split(/\s+/);
+    const nameTokens = [];
+    const specialtyTokens = [];
+
+    for (const token of tokens) {
+      if (stopTokens.has(token.toUpperCase())) break;
+
+      const clean = token.replace(/[^A-Za-z.'-]/g, "");
+      const looksLikeName = /^[A-Za-z.'-]+$/.test(clean) && clean.length > 0;
+      const looksLikeSpecialty = /^[aAbBdDhHlLsStTwWcCeEpP]+$/.test(token);
+
+      if (looksLikeName && specialtyTokens.length === 0 && !looksLikeSpecialty) {
+        nameTokens.push(clean);
+      } else {
+        specialtyTokens.push(token);
+      }
+    }
+
+    const name = nameTokens.join(" ").trim();
+    if (!name) continue;
+
+    people.push({
+      name,
+      lastName: name.split(" ").slice(-1)[0],
+      normalizedName: normalizeName(name),
+      unit: currentUnit,
+      seat,
+      medic: isMedicSeat(seat),
+      specialties: specialtyTokens.join(" ").trim(),
+    });
+  }
+
+  return people;
+}
+
+function parseCalendarText(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return lines.map((line, index) => {
+    const timeMatch = line.match(/^(\d{3,4})\s*[-–]\s*(\d{3,4})\s+(.*)$/);
+    const details = timeMatch ? timeMatch[3] : line;
+    const colonParts = details.split(":");
+    const title = colonParts[0]?.trim() || line;
+    const people = (colonParts.slice(1).join(":") || "")
+      .split(",")
+      .map((person) => person.trim())
+      .filter(Boolean);
+
+    return {
+      id: index + 1,
+      raw: line,
+      start: timeMatch ? timeMatch[1] : "",
+      end: timeMatch ? timeMatch[2] : "",
+      title,
+      people,
+    };
+  });
+}
+
+function findRosterMatch(personName, rosterPeople) {
+  const target = normalizeName(personName);
+
+  return (
+    rosterPeople.find((person) => person.normalizedName === target) ||
+    rosterPeople.find((person) => normalizeName(person.lastName) === target) ||
+    rosterPeople.find(
+      (person) =>
+        person.normalizedName.includes(target) || target.includes(person.normalizedName)
+    ) ||
+    null
+  );
+}
+
+function restrictionEnabled(restrictions, phrase) {
+  return restrictions.toLowerCase().includes(phrase.toLowerCase());
+}
+
+function donorCandidates(vacancy, rosterPeople, restrictionsText, usedNames) {
+  return rosterPeople.filter((person) => {
+    if (person.unit === vacancy.unit) return false;
+    if (person.normalizedName === vacancy.normalizedName) return false;
+    if (usedNames.has(person.normalizedName)) return false;
+
+    if (restrictionEnabled(restrictionsText, "no medic units") && unitType(person.unit) === "Medic Unit") {
+      return false;
+    }
+
+    if (restrictionEnabled(restrictionsText, "avoid hr1") && normalizeUnit(person.unit) === "HR1") {
+      return false;
+    }
+
+    if (
+      restrictionEnabled(restrictionsText, "t1 must retain d") &&
+      normalizeUnit(person.unit) === "T1" &&
+      /\bd\b/i.test(person.specialties)
+    ) {
+      return false;
+    }
+
+    if (
+      restrictionEnabled(restrictionsText, "e101 must retain h") &&
+      normalizeUnit(person.unit) === "E101" &&
+      /\bh\b/i.test(person.specialties)
+    ) {
+      return false;
+    }
+
+    if (vacancy.medic && !person.medic) return false;
+    return true;
+  });
+}
+
+function scoreCandidate(candidate, vacancy) {
+  let score = 0;
+
+  if (candidate.medic === vacancy.medic) score += 4;
+  if (candidate.seat === vacancy.seat) score += 3;
+  if (unitType(candidate.unit) === unitType(vacancy.unit)) score += 2;
+
+  if (candidate.specialties && vacancy.specialties) {
+    const candidateSpecs = candidate.specialties.toLowerCase().split(/\s+/);
+    const vacancySpecs = vacancy.specialties.toLowerCase().split(/\s+/);
+    const shared = candidateSpecs.filter((token) => vacancySpecs.includes(token)).length;
+    score += shared;
+  }
+
+  return score;
+}
+
+function buildOptionRows(vacancies, pickIndex) {
+  const usedNames = new Set();
+
+  return vacancies.map((vacancy) => {
+    const available = vacancy.fills.filter((fill) => !usedNames.has(fill.normalizedName));
+    const selected = available[pickIndex] || available[0] || null;
+
+    if (selected) usedNames.add(selected.normalizedName);
+
+    return {
+      vacancy: `${vacancy.unit} - ${vacancy.name}`,
+      fill: selected?.name || "No clear fill",
+      from: selected?.unit || "-",
+      why: selected
+        ? "Matched by medic status, seat type, unit type, and specialties"
+        : "Manual review needed",
+    };
+  });
+}
+
+function buildOptions(rosterPeople, calendarItems, restrictionsText) {
+  const impacted = [];
+
+  for (const item of calendarItems) {
+    for (const personName of item.people) {
+      const match = findRosterMatch(personName, rosterPeople);
+      if (match) {
+        impacted.push({
+          ...match,
+          eventTitle: item.title,
+          start: item.start,
+          end: item.end,
+        });
+      }
+    }
+  }
+
+  const vacancies = impacted.map((vacancy) => {
+    const usedNames = new Set([vacancy.normalizedName]);
+    const fills = donorCandidates(vacancy, rosterPeople, restrictionsText, usedNames)
+      .map((candidate) => ({ ...candidate, fitScore: scoreCandidate(candidate, vacancy) }))
+      .sort((a, b) => b.fitScore - a.fitScore)
+      .slice(0, 5);
+
+    return { ...vacancy, fills };
+  });
+
+  return {
+    impacted,
+    vacancies,
+    options: [
+      { title: "Option A - Best Fit", rows: buildOptionRows(vacancies, 0) },
+      { title: "Option B - Alternate", rows: buildOptionRows(vacancies, 1) },
+      { title: "Option C - Backup", rows: buildOptionRows(vacancies, 2) },
+    ],
+  };
+}
+
+/* ---------------- UI STYLES ---------------- */
 const styles = {
   page: {
     minHeight: "100vh",
@@ -35,7 +283,7 @@ const styles = {
     color: "#0f172a",
   },
   container: {
-    maxWidth: "1200px",
+    maxWidth: "1350px",
     margin: "0 auto",
     display: "grid",
     gap: "24px",
@@ -52,6 +300,11 @@ const styles = {
     gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
     gap: "24px",
   },
+  grid3: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+    gap: "24px",
+  },
   textarea: {
     width: "100%",
     minHeight: "220px",
@@ -62,6 +315,20 @@ const styles = {
     lineHeight: 1.5,
     resize: "vertical",
     marginTop: "12px",
+    boxSizing: "border-box",
+  },
+  monoTextarea: {
+    width: "100%",
+    minHeight: "260px",
+    border: "1px solid #cbd5e1",
+    borderRadius: "14px",
+    padding: "12px",
+    fontSize: "13px",
+    lineHeight: 1.45,
+    resize: "vertical",
+    marginTop: "12px",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    boxSizing: "border-box",
   },
   input: {
     width: "100%",
@@ -96,11 +363,23 @@ const styles = {
     padding: "12px",
     border: "1px solid #e2e8f0",
   },
+  amberCard: {
+    background: "#fffbeb",
+    borderRadius: "16px",
+    padding: "14px",
+    border: "1px solid #fde68a",
+  },
   blueCard: {
     background: "#eff6ff",
     borderRadius: "16px",
     padding: "14px",
     border: "1px solid #bfdbfe",
+  },
+  greenCard: {
+    background: "#ecfdf5",
+    borderRadius: "16px",
+    padding: "14px",
+    border: "1px solid #a7f3d0",
   },
 };
 
@@ -108,7 +387,9 @@ export default function DailyStaffingAssistant() {
   const [rosterText, setRosterText] = useState("");
   const [calendarText, setCalendarText] = useState("");
   const [policyText, setPolicyText] = useState("");
-  const [restrictions, setRestrictions] = useState("");
+  const [restrictions, setRestrictions] = useState(
+    "- No medic units for backfill\n- T1 must retain D\n- E101 must retain H\n- Avoid HR1 if possible"
+  );
 
   const [loading, setLoading] = useState(false);
 
@@ -121,10 +402,13 @@ export default function DailyStaffingAssistant() {
     },
   ]);
 
-  const matchedPolicies = useMemo(
-    () => searchPolicyRules(policyQuery),
-    [policyQuery]
+  const rosterPeople = useMemo(() => parseRosterText(rosterText), [rosterText]);
+  const calendarItems = useMemo(() => parseCalendarText(calendarText), [calendarText]);
+  const results = useMemo(
+    () => buildOptions(rosterPeople, calendarItems, restrictions),
+    [rosterPeople, calendarItems, restrictions]
   );
+  const matchedPolicies = useMemo(() => searchPolicyRules(policyQuery), [policyQuery]);
 
   async function handlePdfUpload(e, setter) {
     const file = e.target.files?.[0];
@@ -145,7 +429,21 @@ export default function DailyStaffingAssistant() {
   function askAssistant() {
     if (!assistantQuestion.trim()) return;
 
-    const answer = generatePolicyResponse(assistantQuestion);
+    let answer = generatePolicyResponse(assistantQuestion);
+
+    if (/calendar|staffing|option|best|move-up|backfill|today|plan/i.test(assistantQuestion)) {
+      const staffingSummary = [
+        `Impacted personnel found: ${results.impacted.length}.`,
+        `Roster members parsed: ${rosterPeople.length}.`,
+        `Calendar items parsed: ${calendarItems.length}.`,
+        results.options[0]?.rows?.length
+          ? `Top staffing option currently has ${results.options[0].rows.length} fill suggestions.`
+          : "No staffing options generated yet.",
+      ].join(" ");
+
+      answer = `${answer}\n\nOperational context: ${staffingSummary}`;
+    }
+
     setAssistantHistory((prev) => [
       ...prev,
       { question: assistantQuestion, answer },
@@ -160,37 +458,10 @@ export default function DailyStaffingAssistant() {
           <h1 style={{ fontSize: "32px", marginBottom: "8px" }}>
             Daily Staffing Assistant
           </h1>
-          <p style={{ color: "#475569", maxWidth: "900px" }}>
-            Upload the daily roster and calendar, apply restrictions, and use the
-            built-in policy search and assistant for rule guidance.
+          <p style={{ color: "#475569", maxWidth: "980px" }}>
+            Upload the daily roster and calendar, generate staffing options, and use the AI/policy layer to help solve calendar and staffing conflicts.
           </p>
           {loading && <p style={{ marginTop: "12px" }}>Extracting PDF...</p>}
-        </div>
-
-        <div style={styles.grid2}>
-          <div style={styles.card}>
-            <h3>Policy Reference PDF</h3>
-            <input
-              type="file"
-              accept=".pdf"
-              onChange={(e) => handlePdfUpload(e, setPolicyText)}
-              style={styles.input}
-            />
-            <textarea
-              value={policyText}
-              onChange={(e) => setPolicyText(e.target.value)}
-              style={styles.textarea}
-            />
-          </div>
-
-          <div style={styles.card}>
-            <h3>Restrictions</h3>
-            <textarea
-              value={restrictions}
-              onChange={(e) => setRestrictions(e.target.value)}
-              style={styles.textarea}
-            />
-          </div>
         </div>
 
         <div style={styles.grid2}>
@@ -205,7 +476,8 @@ export default function DailyStaffingAssistant() {
             <textarea
               value={rosterText}
               onChange={(e) => setRosterText(e.target.value)}
-              style={styles.textarea}
+              style={styles.monoTextarea}
+              placeholder="Upload a roster PDF or paste roster text"
             />
           </div>
 
@@ -220,93 +492,234 @@ export default function DailyStaffingAssistant() {
             <textarea
               value={calendarText}
               onChange={(e) => setCalendarText(e.target.value)}
-              style={styles.textarea}
+              style={styles.monoTextarea}
+              placeholder="Upload a calendar PDF or paste calendar text"
             />
           </div>
         </div>
 
-        <div style={styles.card}>
-          <h2 style={{ fontSize: "22px" }}>Policy search</h2>
-          <p style={{ color: "#475569", marginTop: "8px" }}>
-            Search the built-in policy library by topic, rule, source, or keyword.
-          </p>
-          <input
-            value={policyQuery}
-            onChange={(e) => setPolicyQuery(e.target.value)}
-            placeholder="Examples: overtime, training OOS, T1, E101, special ops"
-            style={styles.input}
-          />
-          <div
-            style={{
-              display: "grid",
-              gap: "10px",
-              marginTop: "14px",
-              maxHeight: "360px",
-              overflowY: "auto",
-            }}
-          >
-            {matchedPolicies.map((rule) => (
-              <div key={rule.id} style={styles.blueCard}>
-                <div style={styles.pill}>
-                  {rule.source} • {rule.reference}
+        <div style={styles.grid2}>
+          <div style={styles.card}>
+            <h3>Restrictions</h3>
+            <textarea
+              value={restrictions}
+              onChange={(e) => setRestrictions(e.target.value)}
+              style={styles.textarea}
+              placeholder="Enter daily restrictions and staffing notes"
+            />
+          </div>
+
+          <div style={styles.card}>
+            <h3>Optional Policy Reference PDF</h3>
+            <input
+              type="file"
+              accept=".pdf"
+              onChange={(e) => handlePdfUpload(e, setPolicyText)}
+              style={styles.input}
+            />
+            <textarea
+              value={policyText}
+              onChange={(e) => setPolicyText(e.target.value)}
+              style={styles.textarea}
+              placeholder="Optional reference PDF text"
+            />
+          </div>
+        </div>
+
+        <div style={styles.grid2}>
+          <div style={styles.card}>
+            <h2 style={{ fontSize: "22px" }}>Policy search</h2>
+            <p style={{ color: "#475569", marginTop: "8px" }}>
+              Search the built-in policy library by topic, rule, source, or keyword.
+            </p>
+            <input
+              value={policyQuery}
+              onChange={(e) => setPolicyQuery(e.target.value)}
+              placeholder="Examples: overtime, training OOS, T1, E101, special ops"
+              style={styles.input}
+            />
+            <div
+              style={{
+                display: "grid",
+                gap: "10px",
+                marginTop: "14px",
+                maxHeight: "360px",
+                overflowY: "auto",
+              }}
+            >
+              {matchedPolicies.map((rule) => (
+                <div key={rule.id} style={styles.blueCard}>
+                  <div style={styles.pill}>
+                    {rule.source} • {rule.reference}
+                  </div>
+                  <div style={{ fontWeight: 600 }}>{rule.topic}</div>
+                  <div style={{ color: "#334155", marginTop: "6px" }}>
+                    {rule.rule}
+                  </div>
                 </div>
-                <div style={{ fontWeight: 600 }}>{rule.topic}</div>
-                <div style={{ color: "#334155", marginTop: "6px" }}>
-                  {rule.rule}
+              ))}
+              {!matchedPolicies.length && (
+                <div style={{ color: "#64748b" }}>No policy matches found.</div>
+              )}
+            </div>
+          </div>
+
+          <div style={styles.card}>
+            <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+              AI / Policy Assistant
+            </h2>
+            <p style={{ color: "#475569" }}>
+              Ask questions about the day’s staffing, policy issues, or which option looks best.
+            </p>
+            <div style={styles.greenCard}>
+              <div style={{ fontWeight: 600 }}>Current planning context</div>
+              <div style={{ color: "#334155", marginTop: "8px" }}>
+                Impacted members: {results.impacted.length} • Roster parsed: {rosterPeople.length} • Calendar items parsed: {calendarItems.length}
+              </div>
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto",
+                gap: "12px",
+                marginTop: "12px",
+                alignItems: "start",
+              }}
+            >
+              <input
+                value={assistantQuestion}
+                onChange={(e) => setAssistantQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") askAssistant();
+                }}
+                placeholder="Examples: Which option best protects special ops? Can I exceed training OOS limits with move-ups?"
+                style={styles.input}
+              />
+              <button style={styles.button} onClick={askAssistant}>
+                Ask
+              </button>
+            </div>
+            <div style={{ display: "grid", gap: "12px", marginTop: "16px" }}>
+              {assistantHistory.map((item, index) => (
+                <div key={index} style={styles.listCard}>
+                  <div style={{ fontWeight: 600 }}>Q: {item.question}</div>
+                  <div
+                    style={{
+                      color: "#334155",
+                      marginTop: "8px",
+                      whiteSpace: "pre-wrap",
+                    }}
+                  >
+                    A: {item.answer}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.grid2}>
+          <div style={styles.card}>
+            <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+              Parsed roster
+            </h2>
+            <div style={{ display: "grid", gap: "10px", maxHeight: "520px", overflowY: "auto" }}>
+              {rosterPeople.map((person) => (
+                <div key={person.unit + person.name} style={styles.listCard}>
+                  <div style={{ fontWeight: 600 }}>{person.name}</div>
+                  <div style={{ color: "#475569", marginTop: "4px" }}>
+                    {person.unit} • {person.seat} • {person.medic ? "Medic" : "Non-medic"}
+                  </div>
+                  <div style={{ color: "#64748b", marginTop: "4px" }}>
+                    {person.specialties || "No specialty markers parsed"}
+                  </div>
+                </div>
+              ))}
+              {!rosterPeople.length && (
+                <div style={{ color: "#64748b" }}>No roster entries parsed yet.</div>
+              )}
+            </div>
+          </div>
+
+          <div style={styles.card}>
+            <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+              Impacted personnel
+            </h2>
+            <div style={{ display: "grid", gap: "12px" }}>
+              {results.impacted.length ? (
+                results.impacted.map((person) => (
+                  <div key={person.unit + person.name + person.eventTitle} style={styles.amberCard}>
+                    <div style={{ fontWeight: 600 }}>{person.name}</div>
+                    <div style={{ color: "#334155", marginTop: "4px" }}>
+                      {person.unit} • {person.seat} • {person.medic ? "Medic-critical" : "Body vacancy"}
+                    </div>
+                    <div style={{ color: "#475569", marginTop: "4px" }}>
+                      Event: {person.eventTitle} {person.start && person.end ? `(${person.start}-${person.end})` : ""}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div style={{ color: "#64748b" }}>
+                  No impacted personnel found yet. Check roster and calendar formatting.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.card}>
+          <h2 style={{ fontSize: "28px", marginBottom: "16px" }}>
+            Generated staffing options
+          </h2>
+          <div style={styles.grid3}>
+            {results.options.map((option) => (
+              <div key={option.title} style={{ ...styles.listCard, padding: "18px" }}>
+                <div style={styles.pill}>{option.title}</div>
+                <div style={{ display: "grid", gap: "12px" }}>
+                  {option.rows.length ? (
+                    option.rows.map((row) => (
+                      <div
+                        key={row.vacancy + row.fill}
+                        style={{ ...styles.card, padding: "14px", borderRadius: "16px" }}
+                      >
+                        <div style={{ fontWeight: 600 }}>{row.vacancy}</div>
+                        <div style={{ color: "#334155", marginTop: "6px" }}>
+                          Fill: <strong>{row.fill}</strong>
+                        </div>
+                        <div style={{ color: "#334155", marginTop: "4px" }}>
+                          From: <strong>{row.from}</strong>
+                        </div>
+                        <div style={{ color: "#64748b", marginTop: "6px" }}>{row.why}</div>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ color: "#64748b" }}>No staffing options generated yet.</div>
+                  )}
                 </div>
               </div>
             ))}
-            {!matchedPolicies.length && (
-              <div style={{ color: "#64748b" }}>No policy matches found.</div>
-            )}
           </div>
         </div>
 
         <div style={styles.card}>
           <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
-            Policy Assistant
+            Parsed calendar items
           </h2>
-          <p style={{ color: "#475569" }}>
-            Ask a plain-language question and get a policy-grounded answer from
-            the permanent rule library.
-          </p>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto",
-              gap: "12px",
-              marginTop: "12px",
-              alignItems: "start",
-            }}
-          >
-            <input
-              value={assistantQuestion}
-              onChange={(e) => setAssistantQuestion(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") askAssistant();
-              }}
-              placeholder="Examples: Can I exceed training OOS limits with approval? Does T1 need dive coverage?"
-              style={styles.input}
-            />
-            <button style={styles.button} onClick={askAssistant}>
-              Ask
-            </button>
-          </div>
-          <div style={{ display: "grid", gap: "12px", marginTop: "16px" }}>
-            {assistantHistory.map((item, index) => (
-              <div key={index} style={styles.listCard}>
-                <div style={{ fontWeight: 600 }}>Q: {item.question}</div>
-                <div
-                  style={{
-                    color: "#334155",
-                    marginTop: "8px",
-                    whiteSpace: "pre-wrap",
-                  }}
-                >
-                  A: {item.answer}
+          <div style={{ display: "grid", gap: "10px" }}>
+            {calendarItems.map((item) => (
+              <div key={item.id} style={styles.listCard}>
+                <div style={{ fontWeight: 600 }}>{item.title || item.raw}</div>
+                <div style={{ color: "#475569", marginTop: "4px" }}>
+                  {item.start && item.end ? `${item.start}-${item.end}` : "No time parsed"}
+                </div>
+                <div style={{ color: "#64748b", marginTop: "4px" }}>
+                  People: {item.people.length ? item.people.join(", ") : "None parsed"}
                 </div>
               </div>
             ))}
+            {!calendarItems.length && (
+              <div style={{ color: "#64748b" }}>No calendar items parsed yet.</div>
+            )}
           </div>
         </div>
       </div>

@@ -128,9 +128,7 @@ function parseRosterText(text) {
 
   return people;
 }
-<div style={{ marginTop: "10px", color: "#475569", fontSize: "13px" }}>
-  Parsed roster entries: {rosterPeople.length}
-</div>
+
 function parseCalendarText(text) {
   const lines = text
     .split(/\r?\n/)

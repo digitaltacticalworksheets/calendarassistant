@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
+import { policyRules, searchPolicyRules, generatePolicyResponse } from "./utils/policyAssistant";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
@@ -26,7 +27,23 @@ async function extractPdfText(file) {
 }
 
 /* ---------------- YOUR ORIGINAL LOGIC (UNCHANGED) ---------------- */
+const [policyQuery, setPolicyQuery] = useState("");
+const [assistantQuestion, setAssistantQuestion] = useState("");
+const [assistantHistory, setAssistantHistory] = useState([
+  {
+    question: "What is the normal training OOS limit?",
+    answer: generatePolicyResponse("What is the normal training OOS limit?"),
+  },
+]);
 
+const matchedPolicies = useMemo(() => searchPolicyRules(policyQuery), [policyQuery]);
+
+function askAssistant() {
+  if (!assistantQuestion.trim()) return;
+  const answer = generatePolicyResponse(assistantQuestion);
+  setAssistantHistory((prev) => [...prev, { question: assistantQuestion, answer }]);
+  setAssistantQuestion("");
+}
 function normalizeName(value = "") {
   return value.toLowerCase().replace(/[^a-z]/g, "");
 }

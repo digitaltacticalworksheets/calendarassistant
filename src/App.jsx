@@ -173,25 +173,8 @@ function donorCandidates(vacancy, rosterPeople, restrictionsText, usedNames) {
       return false;
     }
 
-    if (restrictionEnabled(restrictionsText, "avoid hr1") && normalizeUnit(person.unit) === "HR1") {
-      return false;
-    }
 
-    if (
-      restrictionEnabled(restrictionsText, "t1 must retain d") &&
-      normalizeUnit(person.unit) === "T1" &&
-      /\bd\b/i.test(person.specialties)
-    ) {
-      return false;
-    }
-
-    if (
-      restrictionEnabled(restrictionsText, "e101 must retain h") &&
-      normalizeUnit(person.unit) === "E101" &&
-      /\bh\b/i.test(person.specialties)
-    ) {
-      return false;
-    }
+   
 
     if (vacancy.medic && !person.medic) return false;
     return true;

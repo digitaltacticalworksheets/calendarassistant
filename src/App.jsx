@@ -402,6 +402,9 @@ export default function DailyStaffingAssistant() {
     },
   ]);
 
+  const [hasGeneratedPlan, setHasGeneratedPlan] = useState(false);
+  const [planSummary, setPlanSummary] = useState("");
+
   const rosterPeople = useMemo(() => parseRosterText(rosterText), [rosterText]);
   const calendarItems = useMemo(() => parseCalendarText(calendarText), [calendarText]);
   const results = useMemo(
@@ -426,22 +429,53 @@ export default function DailyStaffingAssistant() {
     }
   }
 
+  function generatePlan() {
+    const impactedCount = results.impacted.length;
+    const optionCount = results.options.reduce((sum, option) => sum + option.rows.length, 0);
+
+    let summary = "";
+
+    if (!rosterPeople.length) {
+      summary = "No roster entries were parsed. Check the roster PDF extraction or paste cleaner roster text.";
+    } else if (!calendarItems.length) {
+      summary = "No calendar items were parsed. Check the calendar PDF extraction or paste cleaner calendar text.";
+    } else if (!impactedCount) {
+      summary = "No personnel from the calendar matched the roster. Check names and formatting.";
+    } else if (!optionCount) {
+      summary = "Personnel were identified, but no staffing options could be generated from the current roster and restrictions.";
+    } else {
+      summary =
+        `Generated ${results.options.length} staffing options for ${impactedCount} impacted personnel. ` +
+        `Best starting point is ${results.options[0].title}. ` +
+        `Use the AI assistant to ask which option best protects special ops, minimizes movement, or creates the least policy risk.`;
+    }
+
+    setPlanSummary(summary);
+    setHasGeneratedPlan(true);
+  }
+
   function askAssistant() {
     if (!assistantQuestion.trim()) return;
 
     let answer = generatePolicyResponse(assistantQuestion);
 
     if (/calendar|staffing|option|best|move-up|backfill|today|plan/i.test(assistantQuestion)) {
+      const bestOption = results.options[0];
       const staffingSummary = [
         `Impacted personnel found: ${results.impacted.length}.`,
         `Roster members parsed: ${rosterPeople.length}.`,
         `Calendar items parsed: ${calendarItems.length}.`,
-        results.options[0]?.rows?.length
-          ? `Top staffing option currently has ${results.options[0].rows.length} fill suggestions.`
+        hasGeneratedPlan ? "Plan generated: yes." : "Plan generated: no.",
+        bestOption?.rows?.length
+          ? `${bestOption.title} has ${bestOption.rows.length} fill suggestions.`
           : "No staffing options generated yet.",
       ].join(" ");
 
-      answer = `${answer}\n\nOperational context: ${staffingSummary}`;
+      answer += `\n\nOperational context: ${staffingSummary}`;
+
+      if (hasGeneratedPlan && bestOption?.rows?.length) {
+        answer += `\n\nRecommendation: Start with ${bestOption.title}. It currently represents the strongest first-pass staffing solution from the parsed roster and calendar.`;
+      }
     }
 
     setAssistantHistory((prev) => [
@@ -526,6 +560,27 @@ export default function DailyStaffingAssistant() {
           </div>
         </div>
 
+        <div style={styles.card}>
+          <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+            Generate Staffing Plan
+          </h2>
+          <p style={{ color: "#475569" }}>
+            Click below to analyze the roster and calendar and generate staffing options.
+          </p>
+          <button style={styles.button} onClick={generatePlan}>
+            Generate Plan
+          </button>
+
+          {hasGeneratedPlan && (
+            <div style={{ ...styles.greenCard, marginTop: "16px" }}>
+              <div style={{ fontWeight: 600 }}>Planning Summary</div>
+              <div style={{ marginTop: "8px", color: "#334155", whiteSpace: "pre-wrap" }}>
+                {planSummary}
+              </div>
+            </div>
+          )}
+        </div>
+
         <div style={styles.grid2}>
           <div style={styles.card}>
             <h2 style={{ fontSize: "22px" }}>Policy search</h2>
@@ -574,7 +629,7 @@ export default function DailyStaffingAssistant() {
             <div style={styles.greenCard}>
               <div style={{ fontWeight: 600 }}>Current planning context</div>
               <div style={{ color: "#334155", marginTop: "8px" }}>
-                Impacted members: {results.impacted.length} • Roster parsed: {rosterPeople.length} • Calendar items parsed: {calendarItems.length}
+                Impacted members: {results.impacted.length} • Roster parsed: {rosterPeople.length} • Calendar items parsed: {calendarItems.length} • Plan generated: {hasGeneratedPlan ? "Yes" : "No"}
               </div>
             </div>
             <div
@@ -618,110 +673,114 @@ export default function DailyStaffingAssistant() {
           </div>
         </div>
 
-        <div style={styles.grid2}>
-          <div style={styles.card}>
-            <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
-              Parsed roster
-            </h2>
-            <div style={{ display: "grid", gap: "10px", maxHeight: "520px", overflowY: "auto" }}>
-              {rosterPeople.map((person) => (
-                <div key={person.unit + person.name} style={styles.listCard}>
-                  <div style={{ fontWeight: 600 }}>{person.name}</div>
-                  <div style={{ color: "#475569", marginTop: "4px" }}>
-                    {person.unit} • {person.seat} • {person.medic ? "Medic" : "Non-medic"}
-                  </div>
-                  <div style={{ color: "#64748b", marginTop: "4px" }}>
-                    {person.specialties || "No specialty markers parsed"}
-                  </div>
-                </div>
-              ))}
-              {!rosterPeople.length && (
-                <div style={{ color: "#64748b" }}>No roster entries parsed yet.</div>
-              )}
-            </div>
-          </div>
-
-          <div style={styles.card}>
-            <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
-              Impacted personnel
-            </h2>
-            <div style={{ display: "grid", gap: "12px" }}>
-              {results.impacted.length ? (
-                results.impacted.map((person) => (
-                  <div key={person.unit + person.name + person.eventTitle} style={styles.amberCard}>
-                    <div style={{ fontWeight: 600 }}>{person.name}</div>
-                    <div style={{ color: "#334155", marginTop: "4px" }}>
-                      {person.unit} • {person.seat} • {person.medic ? "Medic-critical" : "Body vacancy"}
-                    </div>
-                    <div style={{ color: "#475569", marginTop: "4px" }}>
-                      Event: {person.eventTitle} {person.start && person.end ? `(${person.start}-${person.end})` : ""}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div style={{ color: "#64748b" }}>
-                  No impacted personnel found yet. Check roster and calendar formatting.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div style={styles.card}>
-          <h2 style={{ fontSize: "28px", marginBottom: "16px" }}>
-            Generated staffing options
-          </h2>
-          <div style={styles.grid3}>
-            {results.options.map((option) => (
-              <div key={option.title} style={{ ...styles.listCard, padding: "18px" }}>
-                <div style={styles.pill}>{option.title}</div>
-                <div style={{ display: "grid", gap: "12px" }}>
-                  {option.rows.length ? (
-                    option.rows.map((row) => (
-                      <div
-                        key={row.vacancy + row.fill}
-                        style={{ ...styles.card, padding: "14px", borderRadius: "16px" }}
-                      >
-                        <div style={{ fontWeight: 600 }}>{row.vacancy}</div>
-                        <div style={{ color: "#334155", marginTop: "6px" }}>
-                          Fill: <strong>{row.fill}</strong>
-                        </div>
-                        <div style={{ color: "#334155", marginTop: "4px" }}>
-                          From: <strong>{row.from}</strong>
-                        </div>
-                        <div style={{ color: "#64748b", marginTop: "6px" }}>{row.why}</div>
+        {hasGeneratedPlan && (
+          <>
+            <div style={styles.grid2}>
+              <div style={styles.card}>
+                <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+                  Parsed roster
+                </h2>
+                <div style={{ display: "grid", gap: "10px", maxHeight: "520px", overflowY: "auto" }}>
+                  {rosterPeople.map((person) => (
+                    <div key={person.unit + person.name} style={styles.listCard}>
+                      <div style={{ fontWeight: 600 }}>{person.name}</div>
+                      <div style={{ color: "#475569", marginTop: "4px" }}>
+                        {person.unit} • {person.seat} • {person.medic ? "Medic" : "Non-medic"}
                       </div>
-                    ))
-                  ) : (
-                    <div style={{ color: "#64748b" }}>No staffing options generated yet.</div>
+                      <div style={{ color: "#64748b", marginTop: "4px" }}>
+                        {person.specialties || "No specialty markers parsed"}
+                      </div>
+                    </div>
+                  ))}
+                  {!rosterPeople.length && (
+                    <div style={{ color: "#64748b" }}>No roster entries parsed yet.</div>
                   )}
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
 
-        <div style={styles.card}>
-          <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
-            Parsed calendar items
-          </h2>
-          <div style={{ display: "grid", gap: "10px" }}>
-            {calendarItems.map((item) => (
-              <div key={item.id} style={styles.listCard}>
-                <div style={{ fontWeight: 600 }}>{item.title || item.raw}</div>
-                <div style={{ color: "#475569", marginTop: "4px" }}>
-                  {item.start && item.end ? `${item.start}-${item.end}` : "No time parsed"}
-                </div>
-                <div style={{ color: "#64748b", marginTop: "4px" }}>
-                  People: {item.people.length ? item.people.join(", ") : "None parsed"}
+              <div style={styles.card}>
+                <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+                  Impacted personnel
+                </h2>
+                <div style={{ display: "grid", gap: "12px" }}>
+                  {results.impacted.length ? (
+                    results.impacted.map((person) => (
+                      <div key={person.unit + person.name + person.eventTitle} style={styles.amberCard}>
+                        <div style={{ fontWeight: 600 }}>{person.name}</div>
+                        <div style={{ color: "#334155", marginTop: "4px" }}>
+                          {person.unit} • {person.seat} • {person.medic ? "Medic-critical" : "Body vacancy"}
+                        </div>
+                        <div style={{ color: "#475569", marginTop: "4px" }}>
+                          Event: {person.eventTitle} {person.start && person.end ? `(${person.start}-${person.end})` : ""}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{ color: "#64748b" }}>
+                      No impacted personnel found yet. Check roster and calendar formatting.
+                    </div>
+                  )}
                 </div>
               </div>
-            ))}
-            {!calendarItems.length && (
-              <div style={{ color: "#64748b" }}>No calendar items parsed yet.</div>
-            )}
-          </div>
-        </div>
+            </div>
+
+            <div style={styles.card}>
+              <h2 style={{ fontSize: "28px", marginBottom: "16px" }}>
+                Generated staffing options
+              </h2>
+              <div style={styles.grid3}>
+                {results.options.map((option) => (
+                  <div key={option.title} style={{ ...styles.listCard, padding: "18px" }}>
+                    <div style={styles.pill}>{option.title}</div>
+                    <div style={{ display: "grid", gap: "12px" }}>
+                      {option.rows.length ? (
+                        option.rows.map((row) => (
+                          <div
+                            key={row.vacancy + row.fill}
+                            style={{ ...styles.card, padding: "14px", borderRadius: "16px" }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{row.vacancy}</div>
+                            <div style={{ color: "#334155", marginTop: "6px" }}>
+                              Fill: <strong>{row.fill}</strong>
+                            </div>
+                            <div style={{ color: "#334155", marginTop: "4px" }}>
+                              From: <strong>{row.from}</strong>
+                            </div>
+                            <div style={{ color: "#64748b", marginTop: "6px" }}>{row.why}</div>
+                          </div>
+                        ))
+                      ) : (
+                        <div style={{ color: "#64748b" }}>No staffing options generated yet.</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={styles.card}>
+              <h2 style={{ fontSize: "22px", marginBottom: "12px" }}>
+                Parsed calendar items
+              </h2>
+              <div style={{ display: "grid", gap: "10px" }}>
+                {calendarItems.map((item) => (
+                  <div key={item.id} style={styles.listCard}>
+                    <div style={{ fontWeight: 600 }}>{item.title || item.raw}</div>
+                    <div style={{ color: "#475569", marginTop: "4px" }}>
+                      {item.start && item.end ? `${item.start}-${item.end}` : "No time parsed"}
+                    </div>
+                    <div style={{ color: "#64748b", marginTop: "4px" }}>
+                      People: {item.people.length ? item.people.join(", ") : "None parsed"}
+                    </div>
+                  </div>
+                ))}
+                {!calendarItems.length && (
+                  <div style={{ color: "#64748b" }}>No calendar items parsed yet.</div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -59,8 +59,19 @@ function isMedicSeat(seat = "") {
   return ["FFP", "ENP", "LTP", "CVP", "ACPM"].includes(seat);
 }
 
+function preprocessRosterText(text) {
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/((?:^|\s)(?:HAZ1|HR01|HR1|EMS01|EMS1|M\d{3}|[A-Z]+\d{1,3})\s*-?)/g, "\n$1")
+    .replace(/\s(LTP|LTE|ENP|ENE|FFP|FFE|CVP|CVE|DCP|DCE|ACPM)\s/g, "\n$1 ")
+    .replace(/\n+/g, "\n")
+    .trim();
+}
+
 function parseRosterText(text) {
-  const lines = text
+  const cleanedText = preprocessRosterText(text);
+
+  const lines = cleanedText
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
@@ -117,7 +128,9 @@ function parseRosterText(text) {
 
   return people;
 }
-
+<div style={{ marginTop: "10px", color: "#475569", fontSize: "13px" }}>
+  Parsed roster entries: {rosterPeople.length}
+</div>
 function parseCalendarText(text) {
   const lines = text
     .split(/\r?\n/)
